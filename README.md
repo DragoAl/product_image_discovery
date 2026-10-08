@@ -980,7 +980,7 @@ curl "https://your-app.test/api/product-image-discovery/requests/1/candidates?al
   -H "Accept: application/json"
 ```
 
-When every candidate of the run is rejected the request ends as `no_candidates_found`, with the prevailing reason in `rejection_reason` (for example `WRONG_COLOR`); `manual_review` is reserved for requests with a candidate to review.
+When every candidate of the run is rejected by the scorer the request goes to `manual_review`: candidates were found, and a reviewer can still approve one the scorer got wrong. `no_candidates_found` only means that the search returned nothing.
 
 Approve a candidate:
 

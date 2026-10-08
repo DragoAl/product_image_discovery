@@ -368,3 +368,15 @@ Triggered by Gescat production runs on v1.2.0 (requests 2, 6, 7, 8): every suppl
 
 - `vendor/bin/phpunit --testsuite Unit,Feature`: 109 tests, 345 assertions (incl. an Eloquent-store run of the no-match close).
 - `vendor/bin/phpunit --testsuite E2E`: 6 tests, 4 skipped (live tests).
+
+### All-rejected runs back to manual_review for v1.2.2 (branch `m-ad-fix-review-status`)
+
+v1.2.1 closed requests whose candidates were all rejected as `no_candidates_found` (with the prevailing `rejection_reason`). That status means "the search found nothing": it hid requests that do have candidates from the review queue, where a reviewer could approve one the scorer got wrong, and inflated the "No candidates" counters.
+
+- `SendsRejectedRunToReview` (was `ClosesRequestWithoutMatch`): once every candidate of the run is rejected, verify and failed downloads put the request in `manual_review` with `rejection_reason` null, as before v1.2.1. Kept from v1.2.1: the status is set only when the whole run is verified, stale `best_candidate_id` / `final_score` of earlier runs are cleared, late verify jobs do not pull a decided request back. Audit event renamed to `pipeline.verify.all_rejected`, with the prevailing reason and the counts per reason.
+- Migration `2026_10_08_000009_restore_manual_review_for_all_rejected_runs`: requests in `no_candidates_found` with a `rejection_reason` and candidates in their latest run (only v1.2.1 produced that combination) go back to `manual_review`.
+- Tests: manual_review for all-rejected runs (in-memory and Eloquent stores), failed download, repair migration (fixes v1.2.1 rows, leaves genuine "nothing found" requests and requests with an empty latest run alone).
+
+### Verified Gates
+
+- `vendor/bin/phpunit --testsuite Unit,Feature`: 110 tests, 350 assertions.
