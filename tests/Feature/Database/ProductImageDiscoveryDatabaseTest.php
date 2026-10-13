@@ -163,10 +163,7 @@ class ProductImageDiscoveryDatabaseTest extends DatabaseTestCase
         self::assertSame(800, ProductImageDiscoverySetting::resolveValue('quality.min_width', 999));
     }
 
-    /**
-     * @return array<string, mixed>
-     */
-    public function test_verify_closes_an_all_rejected_run_through_the_eloquent_store(): void
+    public function test_verify_sends_an_all_rejected_run_to_manual_review_through_the_eloquent_store(): void
     {
         $store = new EloquentPipelineStore();
         $logger = new ProductImageEventLogger();
@@ -178,7 +175,7 @@ class ProductImageDiscoveryDatabaseTest extends DatabaseTestCase
                 'raw_payload' => ['context' => ['search' => ['run' => 2]]],
             ]),
         );
-        // A promoted leftover of run 1 must neither keep run 2 open nor show up in its listing.
+        // A promoted leftover of run 1 must not keep run 2 in verification.
         $store->upsertCandidate($request['id'], 'old', [
             'search_run' => 1,
             'source_page_url' => 'https://shop.example/p/old',
@@ -195,10 +192,10 @@ class ProductImageDiscoveryDatabaseTest extends DatabaseTestCase
 
         (new VerifyCandidateImageJob($request['id'], $wrongColor['id']))->handle($store, $logger);
 
-        $closed = ProductImageDiscoveryRequest::query()->findOrFail($request['id']);
+        $reviewed = ProductImageDiscoveryRequest::query()->findOrFail($request['id']);
 
-        $this->assertSame(ProductImageDiscoveryRequestStatus::NoCandidatesFound, $closed->status);
-        $this->assertSame(ProductImageDiscoveryRejectionReason::WrongColor, $closed->rejection_reason);
+        $this->assertSame(ProductImageDiscoveryRequestStatus::ManualReview, $reviewed->status);
+        $this->assertNull($reviewed->rejection_reason);
         $this->assertSame(2, ProductImageDiscoveryCandidate::query()->findOrFail($wrongColor['id'])->search_run);
         $this->assertSame(
             ProductImageDiscoveryCandidateStatus::WrongColor,
@@ -206,6 +203,50 @@ class ProductImageDiscoveryDatabaseTest extends DatabaseTestCase
         );
     }
 
+    public function test_repair_migration_puts_v121_all_rejected_requests_back_in_manual_review(): void
+    {
+        $closedByV121 = ProductImageDiscoveryRequest::query()->create(array_merge($this->requestPayload(), [
+            'erp_model_color_id' => 'CLOSED-BY-V121',
+            'status' => ProductImageDiscoveryRequestStatus::NoCandidatesFound,
+            'rejection_reason' => ProductImageDiscoveryRejectionReason::WrongColor,
+            'raw_payload' => ['context' => ['search' => ['run' => 2]]],
+        ]));
+        $nothingFound = ProductImageDiscoveryRequest::query()->create(array_merge($this->requestPayload(), [
+            'erp_model_color_id' => 'NOTHING-FOUND',
+            'status' => ProductImageDiscoveryRequestStatus::NoCandidatesFound,
+            'rejection_reason' => null,
+            'raw_payload' => ['context' => ['search' => ['run' => 1]]],
+        ]));
+        $emptyLatestRun = ProductImageDiscoveryRequest::query()->create(array_merge($this->requestPayload(), [
+            'erp_model_color_id' => 'EMPTY-LATEST-RUN',
+            'status' => ProductImageDiscoveryRequestStatus::NoCandidatesFound,
+            'rejection_reason' => ProductImageDiscoveryRejectionReason::LowConfidence,
+            'raw_payload' => ['context' => ['search' => ['run' => 3]]],
+        ]));
+
+        foreach ([[$closedByV121, 2], [$nothingFound, 1], [$emptyLatestRun, 2]] as [$request, $searchRun]) {
+            ProductImageDiscoveryCandidate::query()->create([
+                'request_id' => $request->getKey(),
+                'search_run' => $searchRun,
+                'fingerprint' => 'fp-'.$request->getKey(),
+                'source_domain' => 'shop.example',
+                'source_page_url' => 'https://shop.example/p/'.$request->getKey(),
+                'image_url' => 'https://shop.example/p/'.$request->getKey().'.jpg',
+                'status' => ProductImageDiscoveryCandidateStatus::WrongColor,
+            ]);
+        }
+
+        (require __DIR__.'/../../../database/migrations/2026_10_08_000009_restore_manual_review_for_all_rejected_runs.php')->up();
+
+        $this->assertSame(ProductImageDiscoveryRequestStatus::ManualReview, $closedByV121->refresh()->status);
+        $this->assertNull($closedByV121->rejection_reason);
+        $this->assertSame(ProductImageDiscoveryRequestStatus::NoCandidatesFound, $nothingFound->refresh()->status);
+        $this->assertSame(ProductImageDiscoveryRequestStatus::NoCandidatesFound, $emptyLatestRun->refresh()->status);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     protected function requestPayload(): array
     {
         return [

@@ -482,12 +482,12 @@ final class PipelineJobsTest extends TestCase
         self::assertContains('SOURCE_NOT_ALLOWED', $updated['ai_analysis']['issues'] ?? []);
     }
 
-    public function test_verify_closes_the_request_as_no_candidates_found_when_every_candidate_of_the_run_is_rejected(): void
+    public function test_verify_sends_the_request_to_manual_review_when_every_candidate_of_the_run_is_rejected(): void
     {
         $store = new InMemoryPipelineStore();
         $logger = new ProductImageEventLogger($store);
         $request = $this->requestInRun($store, 2, 'candidates_found');
-        // A promoted leftover of an earlier run must not keep the current run open.
+        // A promoted leftover of an earlier run must not keep the current run in verification.
         $store->upsertCandidate($request['id'], 'old', [
             'search_run' => 1,
             'status' => 'verified_match',
@@ -506,13 +506,15 @@ final class PipelineJobsTest extends TestCase
 
         (new VerifyCandidateImageJob($request['id'], $candidates[2]['id']))->handle($store, $logger);
 
-        $closed = $store->getRequest($request['id']);
-        $event = array_values(array_filter($store->events, static fn (array $event): bool => $event['event_type'] === 'pipeline.verify.no_match'))[0];
+        $reviewed = $store->getRequest($request['id']);
+        $event = array_values(array_filter($store->events, static fn (array $event): bool => $event['event_type'] === 'pipeline.verify.all_rejected'))[0];
 
-        self::assertSame('no_candidates_found', $closed['status']);
-        self::assertSame('WRONG_COLOR', $closed['rejection_reason']);
-        self::assertNull($closed['best_candidate_id']);
-        self::assertNull($closed['final_score']);
+        // Candidates were found: a reviewer must still be able to look at them and approve one.
+        self::assertSame('manual_review', $reviewed['status']);
+        self::assertNull($reviewed['rejection_reason']);
+        self::assertNull($reviewed['best_candidate_id']);
+        self::assertNull($reviewed['final_score']);
+        self::assertSame('WRONG_COLOR', $event['context']['prevailing_rejection_reason']);
         self::assertSame(['WRONG_COLOR' => 2, 'LOW_CONFIDENCE' => 1], $event['context']['rejection_reasons']);
     }
 
@@ -562,7 +564,7 @@ final class PipelineJobsTest extends TestCase
         self::assertSame(60, $decided['final_score']);
     }
 
-    public function test_failed_download_of_the_only_promoted_candidate_closes_the_request(): void
+    public function test_failed_download_of_the_only_promoted_candidate_sends_the_request_to_manual_review(): void
     {
         $store = new InMemoryPipelineStore();
         $logger = new ProductImageEventLogger($store);
@@ -576,8 +578,8 @@ final class PipelineJobsTest extends TestCase
         (new DownloadCandidateImageJob($request['id'], $candidate['id']))->handle($store, $logger);
 
         self::assertSame('rejected', $store->getCandidate($candidate['id'])['status']);
-        self::assertSame('no_candidates_found', $store->getRequest($request['id'])['status']);
-        self::assertSame('DOWNLOAD_FAILED', $store->getRequest($request['id'])['rejection_reason']);
+        self::assertSame('manual_review', $store->getRequest($request['id'])['status']);
+        self::assertNull($store->getRequest($request['id'])['rejection_reason']);
     }
 
     /**
