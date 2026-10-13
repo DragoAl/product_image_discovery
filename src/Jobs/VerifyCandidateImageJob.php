@@ -15,7 +15,7 @@ use Padosoft\ProductImageDiscovery\DTO\ProductIdentityData;
 use Padosoft\ProductImageDiscovery\Enums\ProductImageDiscoveryCandidateStatus;
 use Padosoft\ProductImageDiscovery\Enums\ProductImageDiscoveryRequestStatus;
 use Padosoft\ProductImageDiscovery\Enums\ProductImageDiscoveryRejectionReason;
-use Padosoft\ProductImageDiscovery\Jobs\Concerns\SendsRejectedRunToReview;
+use Padosoft\ProductImageDiscovery\Jobs\Concerns\HandlesRejectedRun;
 use Padosoft\ProductImageDiscovery\Jobs\Concerns\DispatchesPipelineJobs;
 use Padosoft\ProductImageDiscovery\Jobs\Concerns\ResolvesQueueName;
 use Padosoft\ProductImageDiscovery\Jobs\Contracts\PipelineStoreInterface;
@@ -25,7 +25,7 @@ use Padosoft\ProductImageDiscovery\Services\Support\TrustedSourceMatcher;
 
 final class VerifyCandidateImageJob implements ShouldQueue
 {
-    use SendsRejectedRunToReview;
+    use HandlesRejectedRun;
     use Dispatchable;
     use DispatchesPipelineJobs;
     use InteractsWithQueue;
@@ -167,7 +167,7 @@ final class VerifyCandidateImageJob implements ShouldQueue
             return $updated;
         }
 
-        $this->sendRejectedRunToReview($store, $logger);
+        $this->handleRejectedRun($store, $logger);
 
         return $updated;
     }

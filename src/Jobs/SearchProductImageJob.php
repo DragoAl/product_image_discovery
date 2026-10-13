@@ -14,6 +14,7 @@ use Padosoft\ProductImageDiscovery\DTO\ProductIdentityData;
 use Padosoft\ProductImageDiscovery\DTO\SearchQueryData;
 use Padosoft\ProductImageDiscovery\Enums\ProductImageDiscoveryRequestStatus;
 use Padosoft\ProductImageDiscovery\Jobs\Concerns\DispatchesPipelineJobs;
+use Padosoft\ProductImageDiscovery\Jobs\Concerns\HandlesRejectedRun;
 use Padosoft\ProductImageDiscovery\Jobs\Concerns\ResolvesQueueName;
 use Padosoft\ProductImageDiscovery\Jobs\Contracts\PipelineStoreInterface;
 use Padosoft\LaravelAiSearchProviders\Data\SearchProviderExecutionResult;
@@ -22,19 +23,28 @@ use Padosoft\LaravelAiSearchProviders\Data\SearchResult;
 use Padosoft\LaravelAiSearchProviders\Data\SearchResultCollection;
 use Padosoft\LaravelAiSearchProviders\SearchProviderManager;
 use Padosoft\ProductImageDiscovery\Services\Logging\ProductImageEventLogger;
+use Padosoft\ProductImageDiscovery\Services\Support\SearchEscalation;
 use Padosoft\ProductImageDiscovery\Services\Support\TextNormalizer;
 
 final class SearchProductImageJob implements ShouldQueue
 {
     use Dispatchable;
     use DispatchesPipelineJobs;
+    use HandlesRejectedRun;
     use InteractsWithQueue;
     use Queueable;
     use ResolvesQueueName;
     use SerializesModels;
 
-    public function __construct(private readonly int|string $requestId)
+    /**
+     * Run continued by an escalation step (see SearchEscalation); null starts a new run. A plain
+     * property with a default, so jobs queued before it existed still unserialize.
+     */
+    private ?int $continuesRun = null;
+
+    public function __construct(private readonly int|string $requestId, ?int $continuesRun = null)
     {
+        $this->continuesRun = $continuesRun;
         $this->onQueue($this->queueNameFor('search'));
     }
 
@@ -50,42 +60,73 @@ final class SearchProductImageJob implements ShouldQueue
             return [];
         }
 
-        $context = $request['context'] ?? [];
+        $previous = $request['context']['search'] ?? [];
+        $previous = is_array($previous) ? $previous : [];
 
-        if (($context['search']['completed_at'] ?? null) !== null) {
+        if ($this->continuesRun !== null) {
+            // A retry, a re-POST or a reviewer acted after the escalation was queued: it is stale.
+            if ((int) ($previous['run'] ?? 0) !== $this->continuesRun
+                || ($previous['completed_at'] ?? null) !== null
+                || $this->enumValue($request['status'] ?? null) !== ProductImageDiscoveryRequestStatus::Searching->value) {
+                return $request;
+            }
+        } elseif (($previous['completed_at'] ?? null) !== null) {
             return $request;
         }
 
         $identity = ProductIdentityData::fromArray(array_merge($request, [
             'raw_payload' => $request['raw_payload'] ?? $request,
         ]));
-        $trustedSources = $store->listTrustedSources($request['client_id'] ?? null);
-        $searchQueries = ($queryGenerator ?? new GenerateSearchQueriesAction())->handle($identity, $trustedSources);
 
-        if ($searchQueries === []) {
-            $searchQueries = [
-                new SearchQueryData(
-                    query: trim(implode(' ', array_filter([$identity->brand, $identity->modelCode, $identity->colorName, $identity->ean, $identity->supplierSku]))),
-                    intent: 'fallback',
-                    priority: 1,
-                ),
-            ];
+        if ($this->continuesRun !== null) {
+            $searchRun = $this->continuesRun;
+            $step = max(1, (int) ($previous['step'] ?? 1)) + 1;
+            $searchQueries = array_map(
+                static fn (array $query): SearchQueryData => SearchQueryData::fromArray($query),
+                array_values(array_filter($previous['queries'] ?? [], 'is_array')),
+            );
+            $executions = array_values(array_filter($previous['executions'] ?? [], 'is_array'));
+            // Images of earlier steps were already verified and rejected in this run.
+            $seenFingerprints = array_fill_keys(array_filter(array_map(
+                static fn (array $candidate): string => (string) ($candidate['fingerprint'] ?? ''),
+                $this->candidatesOfCurrentRun($store, $request),
+            )), true);
+        } else {
+            $trustedSources = $store->listTrustedSources($request['client_id'] ?? null);
+            $searchQueries = ($queryGenerator ?? new GenerateSearchQueriesAction())->handle($identity, $trustedSources);
+
+            if ($searchQueries === []) {
+                $searchQueries = [
+                    new SearchQueryData(
+                        query: trim(implode(' ', array_filter([$identity->brand, $identity->modelCode, $identity->colorName, $identity->ean, $identity->supplierSku]))),
+                        intent: 'fallback',
+                        priority: 1,
+                    ),
+                ];
+            }
+
+            // Every search starts a new run: candidates are tagged with it so earlier runs never leak
+            // into this run's decision.
+            $searchRun = (int) ($request['attempts'] ?? 0) + 1;
+            $step = 1;
+            $executions = [];
+            $seenFingerprints = [];
+
+            if ($previous !== []) {
+                // Left by an escalation that this new run supersedes: lists are merged, not replaced.
+                $store->mergeRequestContext($this->requestId, ['search' => null, 'extract' => null]);
+            }
+
+            $store->updateRequest($this->requestId, [
+                'status' => ProductImageDiscoveryRequestStatus::Searching->value,
+                'search_started_at' => gmdate('c'),
+                'attempts' => $searchRun,
+            ]);
         }
 
-        // Every search starts a new run: candidates are tagged with it so earlier runs never leak
-        // into this run's decision.
-        $searchRun = (int) ($request['attempts'] ?? 0) + 1;
-
-        $store->updateRequest($this->requestId, [
-            'status' => ProductImageDiscoveryRequestStatus::Searching->value,
-            'search_started_at' => gmdate('c'),
-            'attempts' => $searchRun,
-        ]);
-
-        $executions = [];
         $execution = null;
 
-        foreach ($searchQueries as $searchQuery) {
+        foreach (SearchEscalation::pendingQueries($searchQueries, $executions, SearchEscalation::familiesTried($executions)) as $searchQuery) {
             $rawExecution = $manager->searchImages(ProviderSearchQueryData::fromArray([
                 'client_id' => $identity->clientId,
                 'brand' => $identity->brand,
@@ -101,11 +142,15 @@ final class SearchProductImageJob implements ShouldQueue
 
             $execution = $this->discardResultsMissingIdentifier($searchQuery, $identity, $rawExecution);
             $discardedResults = $rawExecution->results->count() - $execution->results->count();
+            $keptResults = $execution->results->count();
+            $execution = $this->discardResultsAlreadySeen($execution, $seenFingerprints);
 
             $executions[] = [
                 'search_query' => $searchQuery->toArray(),
                 'execution' => $execution->toArray(),
                 'discarded_results' => $discardedResults,
+                'seen_results' => $keptResults - $execution->results->count(),
+                'step' => $step,
             ];
 
             if ($discardedResults > 0) {
@@ -113,7 +158,7 @@ final class SearchProductImageJob implements ShouldQueue
                     'intent' => $searchQuery->intent,
                     'query' => $searchQuery->query,
                     'discarded_results' => $discardedResults,
-                    'kept_results' => $execution->results->count(),
+                    'kept_results' => $keptResults,
                 ], requestId: $this->requestId);
             }
 
@@ -122,20 +167,32 @@ final class SearchProductImageJob implements ShouldQueue
             }
         }
 
-        $execution ??= $manager->searchImages(ProviderSearchQueryData::fromArray([
-            'client_id' => $identity->clientId,
-            'query' => $identity->ean ?? $identity->supplierSku ?? $identity->modelCode ?? '',
-        ]));
+        if ($this->continuesRun === null) {
+            $execution ??= $manager->searchImages(ProviderSearchQueryData::fromArray([
+                'client_id' => $identity->clientId,
+                'query' => $identity->ean ?? $identity->supplierSku ?? $identity->modelCode ?? '',
+            ]));
+        } else {
+            $execution ??= new SearchProviderExecutionResult(provider: null, results: new SearchResultCollection([]));
+        }
 
-        $store->updateRequest($this->requestId, [
-            'status' => $execution->results->isEmpty()
-                ? ProductImageDiscoveryRequestStatus::NoCandidatesFound->value
-                : ProductImageDiscoveryRequestStatus::CandidatesFound->value,
+        $found = ! $execution->results->isEmpty();
+        // A step that finds no new image leaves the status to handleRejectedRun() below.
+        $status = match (true) {
+            $found => ProductImageDiscoveryRequestStatus::CandidatesFound,
+            $this->continuesRun === null => ProductImageDiscoveryRequestStatus::NoCandidatesFound,
+            default => null,
+        };
+
+        $store->updateRequest($this->requestId, array_filter([
+            'status' => $status?->value,
             'search_completed_at' => gmdate('c'),
-        ]);
+        ]));
         $store->mergeRequestContext($this->requestId, [
             'search' => [
                 'run' => $searchRun,
+                'step' => $step,
+                'families_tried' => SearchEscalation::familiesTried($executions),
                 'completed_at' => gmdate('c'),
                 'queries' => array_map(static fn (SearchQueryData $query): array => $query->toArray(), $searchQueries),
                 'execution' => $execution->toArray(),
@@ -144,15 +201,55 @@ final class SearchProductImageJob implements ShouldQueue
         ]);
 
         $logger->record('pipeline.search.completed', [
+            'step' => $step,
             'results_count' => $execution->results->count(),
             'provider' => $execution->provider?->toSafeArray(),
             'attempts' => $execution->attempts,
             'used_fallback' => $execution->usedFallback,
         ], requestId: $this->requestId);
 
-        $this->dispatchIfPossible(new ExtractCandidateSourcesJob($this->requestId));
+        if ($status !== null) {
+            $this->dispatchIfPossible(new ExtractCandidateSourcesJob($this->requestId));
+
+            return $store->getRequest($this->requestId) ?? $request;
+        }
+
+        // The run ends with the candidates of its earlier steps, all rejected.
+        $this->handleRejectedRun($store, $logger);
+
+        if ($this->enumValue($store->getRequest($this->requestId)['status'] ?? null) === ProductImageDiscoveryRequestStatus::Searching->value) {
+            $store->updateRequest($this->requestId, [
+                'status' => ProductImageDiscoveryRequestStatus::ManualReview->value,
+            ]);
+        }
 
         return $store->getRequest($this->requestId) ?? $request;
+    }
+
+    /**
+     * @param array<string, true> $seenFingerprints
+     */
+    private function discardResultsAlreadySeen(SearchProviderExecutionResult $execution, array $seenFingerprints): SearchProviderExecutionResult
+    {
+        if ($seenFingerprints === []) {
+            return $execution;
+        }
+
+        $kept = array_values(array_filter(
+            $execution->results->all(),
+            static fn (SearchResult $result): bool => ! isset($seenFingerprints[$result->fingerprint()]),
+        ));
+
+        if (count($kept) === $execution->results->count()) {
+            return $execution;
+        }
+
+        return new SearchProviderExecutionResult(
+            provider: $execution->provider,
+            results: new SearchResultCollection($kept),
+            attempts: $execution->attempts,
+            usedFallback: $execution->usedFallback,
+        );
     }
 
     /**

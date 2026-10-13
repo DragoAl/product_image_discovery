@@ -102,17 +102,21 @@ final class ExtractCandidateSourcesJob implements ShouldQueue
         }
 
         $candidateIds = array_values(array_unique($candidateIds));
-        $sourcePageUrls = array_values(array_unique(array_filter($sourcePageUrls)));
+        // An escalation step of the run (see SearchEscalation) adds to the candidates of the
+        // earlier steps, which are already verified: only the new ones are dispatched below.
+        $previousExtract = is_array($context['extract'] ?? null) ? $context['extract'] : [];
+        $runCandidateIds = array_values(array_unique(array_merge($previousExtract['candidate_ids'] ?? [], $candidateIds)));
+        $sourcePageUrls = array_values(array_unique(array_filter(array_merge($previousExtract['source_pages'] ?? [], $sourcePageUrls))));
 
         $store->updateRequest($this->requestId, [
-            'status' => $candidateIds === []
+            'status' => $runCandidateIds === []
                 ? ProductImageDiscoveryRequestStatus::NoCandidatesFound->value
                 : ProductImageDiscoveryRequestStatus::CandidatesFound->value,
         ]);
         $store->mergeRequestContext($this->requestId, [
             'extract' => [
                 'completed_at' => gmdate('c'),
-                'candidate_ids' => $candidateIds,
+                'candidate_ids' => $runCandidateIds,
                 'source_pages' => $sourcePageUrls,
             ],
         ]);

@@ -980,7 +980,17 @@ curl "https://your-app.test/api/product-image-discovery/requests/1/candidates?al
   -H "Accept: application/json"
 ```
 
-When every candidate of the run is rejected by the scorer the request goes to `manual_review`: candidates were found, and a reviewer can still approve one the scorer got wrong. `no_candidates_found` only means that the search returned nothing.
+The search keeps the results of the first query that returns any. Image providers such as Brave rarely return nothing: a quoted code they have not indexed brings back unrelated items of the brand. So when every candidate of the run is rejected by the scorer, the run escalates: the request goes back to `searching` and the next step skips the queries already executed and the families whose results were all rejected (`ean`, `supplier_sku`, `model_code`, `description`), until a candidate is promoted, no query is left or the step budget is spent. Images already seen in the run are not verified again; every step adds its candidates to the same run, recorded in `raw_payload.context.search` (`step`, `families_tried`, and `step` on each entry of `executions`), with a `pipeline.search.escalated` audit event per step.
+
+When the run ends with every candidate rejected the request goes to `manual_review`, with the candidates of all its steps: candidates were found, and a reviewer can still approve one the scorer got wrong. `no_candidates_found` only means that the first search returned nothing.
+
+```env
+PRODUCT_IMAGE_DISCOVERY_SEARCH_ESCALATION=true
+# Steps per run, the first search included (one per query family at most).
+PRODUCT_IMAGE_DISCOVERY_SEARCH_MAX_STEPS=4
+```
+
+Each step costs one provider call per query it executes and one verification (AI included, when enabled) per new image. The debug flow command runs a single step.
 
 Approve a candidate:
 
