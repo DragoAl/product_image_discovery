@@ -42,6 +42,9 @@ final class SearchProductImageJob implements ShouldQueue
      */
     private ?int $continuesRun = null;
 
+    /** Query family whose step runs all its queries instead of stopping at the first with results. */
+    private const COLLECTED_FAMILY = 'description';
+
     public function __construct(private readonly int|string $requestId, ?int $continuesRun = null)
     {
         $this->continuesRun = $continuesRun;
@@ -125,8 +128,15 @@ final class SearchProductImageJob implements ShouldQueue
         }
 
         $execution = null;
+        // Results of the description family: a product name is matched loosely and the ERP color
+        // name is often not the shop's one, so the step runs the name with and without the color.
+        $collected = null;
 
         foreach (SearchEscalation::pendingQueries($searchQueries, $executions, SearchEscalation::familiesTried($executions)) as $searchQuery) {
+            if ($collected !== null && $searchQuery->family() !== self::COLLECTED_FAMILY) {
+                continue;
+            }
+
             $rawExecution = $manager->searchImages(ProviderSearchQueryData::fromArray([
                 'client_id' => $identity->clientId,
                 'brand' => $identity->brand,
@@ -162,10 +172,22 @@ final class SearchProductImageJob implements ShouldQueue
                 ], requestId: $this->requestId);
             }
 
-            if (! $execution->results->isEmpty()) {
+            if ($execution->results->isEmpty()) {
+                continue;
+            }
+
+            if ($searchQuery->family() !== self::COLLECTED_FAMILY) {
                 break;
             }
+
+            $collected = $this->mergeExecutions($collected, $execution);
+
+            foreach ($execution->results->all() as $result) {
+                $seenFingerprints[$result->fingerprint()] = true;
+            }
         }
+
+        $execution = $collected ?? $execution;
 
         if ($this->continuesRun === null) {
             $execution ??= $manager->searchImages(ProviderSearchQueryData::fromArray([
@@ -224,6 +246,20 @@ final class SearchProductImageJob implements ShouldQueue
         }
 
         return $store->getRequest($this->requestId) ?? $request;
+    }
+
+    private function mergeExecutions(?SearchProviderExecutionResult $collected, SearchProviderExecutionResult $execution): SearchProviderExecutionResult
+    {
+        if ($collected === null) {
+            return $execution;
+        }
+
+        return new SearchProviderExecutionResult(
+            provider: $collected->provider ?? $execution->provider,
+            results: new SearchResultCollection([...$collected->results->all(), ...$execution->results->all()]),
+            attempts: [...$collected->attempts, ...$execution->attempts],
+            usedFallback: $collected->usedFallback || $execution->usedFallback,
+        );
     }
 
     /**

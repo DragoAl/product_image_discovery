@@ -52,17 +52,18 @@ final class GenerateSearchQueriesAction
         };
 
         $brand = $this->quote($identity->brand);
+        $supplierSku = $this->supplierSkuAddsOnlyAColorWord($identity) ? null : $identity->supplierSku;
 
         if ($identity->ean !== null) {
             $add($brand . ' ' . $this->quote($identity->ean), 'ean', 100);
         }
 
-        if ($identity->supplierSku !== null && $identity->colorCode !== null) {
-            $add($brand . ' ' . $this->quote($identity->supplierSku) . ' ' . $this->quote($identity->colorCode), 'supplier_sku_color_code', 99);
+        if ($supplierSku !== null && $identity->colorCode !== null) {
+            $add($brand . ' ' . $this->quote($supplierSku) . ' ' . $this->quote($identity->colorCode), 'supplier_sku_color_code', 99);
         }
 
-        if ($identity->supplierSku !== null && $identity->colorName !== null) {
-            $add($brand . ' ' . $this->quote($identity->supplierSku) . ' ' . $this->quote($identity->colorName), 'supplier_sku_color_name', 98);
+        if ($supplierSku !== null && $identity->colorName !== null) {
+            $add($brand . ' ' . $this->quote($supplierSku) . ' ' . $this->quote($identity->colorName), 'supplier_sku_color_name', 98);
         }
 
         if ($identity->modelCode !== null && $identity->colorCode !== null) {
@@ -73,8 +74,8 @@ final class GenerateSearchQueriesAction
             $add($brand . ' ' . $this->quote($identity->modelCode) . ' ' . $this->quote($identity->colorName), 'model_code_color_name', 96);
         }
 
-        if ($identity->supplierSku !== null) {
-            $add($brand . ' ' . $this->quote($identity->supplierSku), 'supplier_sku', 90);
+        if ($supplierSku !== null) {
+            $add($brand . ' ' . $this->quote($supplierSku), 'supplier_sku', 90);
         }
 
         // Colorless fallbacks: a color code like "001" is shared by unrelated products of the same
@@ -118,12 +119,12 @@ final class GenerateSearchQueriesAction
                     $add('site:' . $domain . ' ' . $this->quote($identity->ean), 'site_ean', 100, 'image', $domain, ['source' => $source]);
                 }
 
-                if ($identity->supplierSku !== null && $identity->colorCode !== null) {
-                    $add('site:' . $domain . ' ' . $this->quote($identity->supplierSku) . ' ' . $this->quote($identity->colorCode), 'site_supplier_sku_color_code', 99, 'image', $domain, ['source' => $source]);
+                if ($supplierSku !== null && $identity->colorCode !== null) {
+                    $add('site:' . $domain . ' ' . $this->quote($supplierSku) . ' ' . $this->quote($identity->colorCode), 'site_supplier_sku_color_code', 99, 'image', $domain, ['source' => $source]);
                 }
 
-                if ($identity->supplierSku !== null && $identity->colorName !== null) {
-                    $add('site:' . $domain . ' ' . $this->quote($identity->supplierSku) . ' ' . $this->quote($identity->colorName), 'site_supplier_sku_color_name', 98, 'image', $domain, ['source' => $source]);
+                if ($supplierSku !== null && $identity->colorName !== null) {
+                    $add('site:' . $domain . ' ' . $this->quote($supplierSku) . ' ' . $this->quote($identity->colorName), 'site_supplier_sku_color_name', 98, 'image', $domain, ['source' => $source]);
                 }
 
                 if ($identity->modelCode !== null && $identity->colorCode !== null) {
@@ -134,8 +135,8 @@ final class GenerateSearchQueriesAction
                     $add('site:' . $domain . ' ' . $this->quote($identity->modelCode) . ' ' . $this->quote($identity->colorName), 'site_model_code_color_name', 96, 'image', $domain, ['source' => $source]);
                 }
 
-                if ($identity->supplierSku !== null) {
-                    $add('site:' . $domain . ' ' . $this->quote($identity->supplierSku), 'site_supplier_sku', 92, 'image', $domain, ['source' => $source]);
+                if ($supplierSku !== null) {
+                    $add('site:' . $domain . ' ' . $this->quote($supplierSku), 'site_supplier_sku', 92, 'image', $domain, ['source' => $source]);
                 }
 
                 if ($identity->modelCode !== null) {
@@ -147,6 +148,33 @@ final class GenerateSearchQueriesAction
         usort($queries, static fn (SearchQueryData $a, SearchQueryData $b): int => $b->weight <=> $a->weight ?: $a->priority <=> $b->priority);
 
         return array_slice($queries, 0, $maxQueries);
+    }
+
+    /**
+     * Some ERPs send the supplier SKU as the model code plus a color word ("763435008IW2885 Camel").
+     * No page writes that phrase, so its queries only find other products of the brand in that
+     * color: the model code queries already search the code. A numeric color code is kept, since
+     * shops do write "26SSH01164-002".
+     */
+    private function supplierSkuAddsOnlyAColorWord(ProductIdentityData $identity): bool
+    {
+        $supplierSku = TextNormalizer::normalizeText($identity->supplierSku);
+        $modelCode = TextNormalizer::normalizeText($identity->modelCode);
+
+        if ($supplierSku === null || $modelCode === null || ! str_starts_with($supplierSku, $modelCode . ' ')) {
+            return false;
+        }
+
+        $rest = substr($supplierSku, strlen($modelCode) + 1);
+
+        if (preg_match('/\d/', $rest) === 1) {
+            return false;
+        }
+
+        return in_array($rest, array_filter([
+            TextNormalizer::normalizeText($identity->colorCode),
+            TextNormalizer::normalizeText($identity->colorName),
+        ]), true) || TextNormalizer::mentionedColors($rest) !== [];
     }
 
     private function quote(?string $value): string

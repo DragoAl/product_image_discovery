@@ -22,8 +22,9 @@ final class SearchEscalationTest extends TestCase
 {
     // Brave answers a quoted code it has not indexed with unrelated items of the brand: the
     // supplier SKU and the model code queries each bring back other camel products, only the
-    // product name finds the bag.
-    private const SUPPLIER_SKU = '"763435008IW2885 Camel"';
+    // product name finds the bag. Gescat sends the supplier SKU as the model code plus the color
+    // word, which is not searched; SUPPLIER_SKU is the same SKU written as a code of its own.
+    private const SUPPLIER_SKU = '"763435-008IW-2885"';
 
     private const MODEL_CODE = '"763435008IW2885"';
 
@@ -54,7 +55,7 @@ final class SearchEscalationTest extends TestCase
     public function test_a_rejected_run_searches_the_next_query_families_until_one_finds_the_product(): void
     {
         $provider = $this->provider(self::bag());
-        $requestId = $this->ingest();
+        $requestId = $this->ingest(supplierSku: '763435-008IW-2885');
 
         // Step 1: the supplier SKU query wins the "first query with results" race with coats.
         $this->search($provider, $requestId);
@@ -74,7 +75,8 @@ final class SearchEscalationTest extends TestCase
         self::assertSame(['supplier_sku', 'model_code'], $this->store->getRequest($requestId)['context']['search']['families_tried']);
         self::assertSame(3, $this->lastEvent('pipeline.search.escalated')['context']['step']);
 
-        // Step 3: only the description family is left, and it finds the bag.
+        // Step 3: only the description family is left, and it finds the bag. Its query without
+        // the color runs too, and brings back only the bag again.
         $this->search($provider, $requestId, continuesRun: 1);
         $request = $this->store->getRequest($requestId);
 
@@ -84,11 +86,13 @@ final class SearchEscalationTest extends TestCase
         self::assertSame(['supplier_sku', 'model_code', 'description'], $request['context']['search']['families_tried']);
         self::assertCount(1, $request['context']['search']['execution']['results']);
         self::assertSame([
-            '"Saint Laurent" "763435008IW2885 Camel" "Camel"',
+            '"Saint Laurent" "763435-008IW-2885" "Camel"',
             '"Saint Laurent" "763435008IW2885" "Camel"',
             '"Saint Laurent" "Le 5 7 Bea Suede Tote Bag" "Beige"',
+            '"Saint Laurent" Le 5 7 Bea Suede Tote Bag',
         ], $provider->queries);
-        self::assertSame([1, 2, 3], array_column($request['context']['search']['executions'], 'step'));
+        self::assertSame([1, 2, 3, 3], array_column($request['context']['search']['executions'], 'step'));
+        self::assertSame(1, $request['context']['search']['executions'][3]['seen_results']);
 
         (new ExtractCandidateSourcesJob($requestId))->handle($this->store, $this->logger);
         $bag = $this->candidateWithImage('https://shop.example.test/bea-camel.jpg');
@@ -103,15 +107,65 @@ final class SearchEscalationTest extends TestCase
         self::assertSame(5, ProductImageDiscoveryEvent::query()->where('event_type', 'pipeline.verify.completed')->count());
     }
 
-    public function test_a_run_whose_last_step_finds_nothing_new_goes_to_manual_review_with_all_its_candidates(): void
+    public function test_a_supplier_sku_that_only_adds_the_color_word_is_not_searched(): void
     {
-        // The product name only brings back the coats already rejected at step 1.
-        $provider = $this->provider(self::coats('a'));
+        $provider = $this->provider(self::bag());
         $requestId = $this->ingest();
 
         $this->search($provider, $requestId);
         $this->extractAndVerify($requestId);
         $this->search($provider, $requestId, continuesRun: 1);
+
+        $request = $this->store->getRequest($requestId);
+        self::assertSame('candidates_found', $request['status']);
+        self::assertSame(2, $request['context']['search']['step']);
+        self::assertSame(['model_code', 'description'], $request['context']['search']['families_tried']);
+        self::assertSame([
+            '"Saint Laurent" "763435008IW2885" "Camel"',
+            '"Saint Laurent" "Le 5 7 Bea Suede Tote Bag" "Beige"',
+            '"Saint Laurent" Le 5 7 Bea Suede Tote Bag',
+        ], $provider->queries);
+        self::assertNotContains('supplier_sku', array_map(
+            static fn (array $query): string => $query['intent'],
+            $request['context']['search']['queries'],
+        ));
+    }
+
+    public function test_the_description_step_merges_the_name_results_with_and_without_the_color(): void
+    {
+        $provider = new ScriptedSearchProvider([
+            self::MODEL_CODE => self::coats('b'),
+            '"Le 5 7 Bea Suede Tote Bag" "Beige"' => self::coats('a'),
+            self::NAME => self::bag(),
+        ]);
+        $requestId = $this->ingest();
+
+        $this->search($provider, $requestId);
+        $this->extractAndVerify($requestId);
+        $this->search($provider, $requestId, continuesRun: 1);
+
+        $request = $this->store->getRequest($requestId);
+        $images = array_column($request['context']['search']['execution']['results'], 'image_url');
+
+        self::assertSame([
+            'https://shop.example.test/camel-coat-a.jpg',
+            'https://shop.example.test/camel-loafers-a.jpg',
+            'https://shop.example.test/bea-camel.jpg',
+        ], $images);
+        self::assertSame([1, 2, 2], array_column($request['context']['search']['executions'], 'step'));
+
+        (new ExtractCandidateSourcesJob($requestId))->handle($this->store, $this->logger);
+
+        self::assertCount(5, $this->store->getRequest($requestId)['context']['extract']['candidate_ids']);
+    }
+
+    public function test_a_run_whose_last_step_finds_nothing_new_goes_to_manual_review_with_all_its_candidates(): void
+    {
+        // The product name only brings back the coats already rejected at step 1.
+        $provider = $this->provider(self::coats('b'));
+        $requestId = $this->ingest();
+
+        $this->search($provider, $requestId);
         $this->extractAndVerify($requestId);
         $this->search($provider, $requestId, continuesRun: 1);
 
@@ -120,10 +174,10 @@ final class SearchEscalationTest extends TestCase
 
         self::assertSame('manual_review', $request['status']);
         self::assertNull($request['rejection_reason']);
-        self::assertSame(4, $event['context']['candidate_count']);
-        self::assertSame(3, $request['context']['search']['step']);
-        self::assertSame(2, $request['context']['search']['executions'][3]['seen_results']);
-        self::assertSame(2, $this->escalationsDispatched());
+        self::assertSame(2, $event['context']['candidate_count']);
+        self::assertSame(2, $request['context']['search']['step']);
+        self::assertSame([2, 2], array_column(array_slice($request['context']['search']['executions'], 1), 'seen_results'));
+        self::assertSame(1, $this->escalationsDispatched());
     }
 
     public function test_only_the_first_job_that_sees_the_run_rejected_starts_the_next_step(): void
@@ -178,7 +232,7 @@ final class SearchEscalationTest extends TestCase
         self::assertSame(0, $this->escalationsDispatched());
     }
 
-    private function ingest(): int|string
+    private function ingest(string $supplierSku = '763435008IW2885 Camel'): int|string
     {
         return (new IngestProductImageDiscoveryJob([
             'client_id' => 1,
@@ -186,7 +240,7 @@ final class SearchEscalationTest extends TestCase
             'erp_model_color_id' => 'gescat-221117',
             'brand' => 'Saint Laurent',
             'supplier' => 'Saint Laurent',
-            'supplier_sku' => '763435008IW2885 Camel',
+            'supplier_sku' => $supplierSku,
             'model_code' => '763435008IW2885',
             'color_code' => 'Camel',
             'color_name' => 'Beige',

@@ -29,6 +29,39 @@ final class TextNormalizerTest extends TestCase
         self::assertContains('beige', TextNormalizer::mentionedColors('marrone cammello nylon ultralight'));
     }
 
+    public function test_it_finds_a_code_in_a_url_slug_or_in_a_file_name_split_by_separators(): void
+    {
+        $code = '763435008IW2885';
+
+        self::assertTrue(TextNormalizer::containsExactCode('https://fashionclinic.com/products/saint-laurent-caramel-cognac-le-5-a-7-bea-suede-tote-763435008iw2885', $code));
+        self::assertTrue(TextNormalizer::containsExactCode('https://fashionclinic.com/cdn/shop/files/763435008IW.2885_06.jpg?v=1747414057', $code));
+        self::assertTrue(TextNormalizer::containsExactCode('https://shop.example/p/bea-763435-008iw-2885.html', $code));
+        // The same model in another color is a similar code, never this one.
+        self::assertFalse(TextNormalizer::containsExactCode('https://shop.example/p/bea-763435008iw2884', $code));
+        self::assertTrue(TextNormalizer::hasSimilarCodeMismatch('https://shop.example/p/bea-763435008iw2884', $code));
+    }
+
+    public function test_plain_words_of_a_url_slug_are_not_joined_into_a_code(): void
+    {
+        $url = 'https://www.nike.com/t/air-force-1-07-mens-shoes-jBrhbr';
+
+        self::assertFalse(TextNormalizer::containsExactCode($url, 'Air Force 1 07'));
+        self::assertFalse(TextNormalizer::containsCodePrefix($url, 'Air Force 1 07'));
+    }
+
+    public function test_shop_names_of_brown_shades_and_adjacent_colors_are_read_only_on_request(): void
+    {
+        self::assertSame([], TextNormalizer::mentionedColors('Caramel Cognac suede tote'));
+        self::assertSame(['brown'], TextNormalizer::mentionedColors('Caramel Cognac suede tote', true));
+        self::assertSame('cognac', TextNormalizer::canonicalColor('Cognac'));
+        self::assertSame('brown', TextNormalizer::canonicalColor('Cognac', true));
+        self::assertTrue(TextNormalizer::colorsAreAdjacent('beige', ['brown']));
+        self::assertTrue(TextNormalizer::colorsAreAdjacent('brown', ['beige', 'brown']));
+        self::assertFalse(TextNormalizer::colorsAreAdjacent('beige', ['brown', 'black']));
+        self::assertFalse(TextNormalizer::colorsAreAdjacent('black', ['brown']));
+        self::assertFalse(TextNormalizer::colorsAreAdjacent('beige', []));
+    }
+
     /**
      * @param list<string> $expected
      */

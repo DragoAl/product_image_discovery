@@ -6,6 +6,7 @@ namespace Padosoft\ProductImageDiscovery\DTO;
 
 use JsonSerializable;
 use Padosoft\ProductImageDiscovery\Services\Support\DomainNormalizer;
+use Padosoft\ProductImageDiscovery\Services\Support\LargeImageUrl;
 use Padosoft\ProductImageDiscovery\Services\Support\TextNormalizer;
 
 final readonly class SearchResultData implements JsonSerializable
@@ -48,16 +49,21 @@ final readonly class SearchResultData implements JsonSerializable
 
     public function toCandidate(string $resolverName = 'search_result'): CandidateImageData
     {
+        // The provider's size belongs to the thumbnail: once the URL asks for a larger image, the
+        // size is unknown until the quality check reads the downloaded file.
+        $imageUrl = LargeImageUrl::resolve($this->imageUrl);
+        $resized = $imageUrl !== $this->imageUrl;
+
         return new CandidateImageData(
             sourcePageUrl: $this->sourcePageUrl,
-            imageUrl: $this->imageUrl,
+            imageUrl: $imageUrl,
             sourceDomain: DomainNormalizer::normalizeDomain($this->sourcePageUrl),
             resolverName: $resolverName,
             searchProvider: $this->provider,
             title: $this->title,
             description: $this->snippet,
-            width: $this->width,
-            height: $this->height,
+            width: $resized ? null : $this->width,
+            height: $resized ? null : $this->height,
             mimeType: $this->mimeType,
             evidence: ['search_result' => $this->toArray()],
         );

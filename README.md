@@ -1147,6 +1147,20 @@ Important options:
 - `storage.disk`: disk used for candidate assets.
 - `defaults`: search, quality and decision thresholds.
 
+### Scoring settings
+
+The scorer reads its knobs from the `product_image_discovery_settings` table (global rows, or per `client_id`), which the admin edits on its Settings page. Two rules are off unless a setting turns them on (`true`, `1` or `"true"`):
+
+- `ai_confirms_identifier_match`: the AI verdict weighs 15 points; with this setting a full confirmation (brand, model, product type, color, variant all matching, confidence at or above `ai_mismatch_confidence_threshold`) weighs 35 when a strong identifier is already on the page (code, EAN or multi-word model name). A shop page that carries the code and that the AI confirms then reaches `min_candidate_score` from an untrusted source; a lookalike without the code still cannot.
+- `tolerate_adjacent_colors`: shades that shops and ERPs name differently (beige and brown: camel, tan, caramel, cognac...) are neither a match nor a mismatch, instead of a `WRONG_COLOR` (-45). The shop names of brown shades (caramel, cognac, tobacco, chocolate, chestnut...) are read only with this setting. A color outside the group, and an AI color mismatch, still reject the candidate.
+
+Always on:
+
+- Codes are also found inside URL paths: the slug `...-tote-763435008iw2885` and the file name `763435008IW.2885_06.jpg` match the model code `763435008IW2885`. Only words with a digit are joined, so a slug of plain words (`air-force-1-07`) is not read as a code.
+- Shopify images (`cdn.shopify.com` or a shop's `/cdn/shop/`) are asked 2048 px wide instead of the thumbnail the page showed (`width=165`, `height`, `crop`, legacy `_165x220` suffixes). Not the original upload, which can weigh several megabytes for the AI provider. The candidate size is then left empty, so the quality check measures the downloaded file.
+- A supplier SKU that is only the model code plus a color word (`763435008IW2885 Camel`) is not searched: no page writes it, and its queries bring back other products of the brand in that color. A numeric color code (`26SSH01164 002`) is kept.
+- The description step runs the product name with and without the color and merges the results: the ERP color name is often not the shop's one.
+
 ## Trusted Sources
 
 Trusted source records let you prefer domains that are known to publish correct product images for a client or brand. A trusted source should improve confidence, but it should not bypass hard checks such as wrong color, wrong model, placeholder image or low-quality asset.
