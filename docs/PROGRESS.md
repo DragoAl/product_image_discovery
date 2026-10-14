@@ -380,3 +380,20 @@ v1.2.1 closed requests whose candidates were all rejected as `no_candidates_foun
 ### Verified Gates
 
 - `vendor/bin/phpunit --testsuite Unit,Feature`: 110 tests, 350 assertions.
+
+### Search escalation by query family for v1.3.0 (branch `m-ad-search-escalation`)
+
+Triggered by Gescat request 16 (Saint Laurent `763435008IW2885 Camel`, "Le 5 à 7 Bea" suede tote): the first query (`supplier_sku_color_code`) won the "first query with results" race with ten unrelated "Saint Laurent camel" items (coats, loafers, sweaters), every candidate was rejected and the request went to `manual_review` with nothing useful; the eight other queries, including the product name that finds the bag, never ran. `/retry` repeated the same first query.
+
+- `SearchQueryData::family()`: `ean`, `supplier_sku`, `model_code` (incl. `season_model_code`) or `description`; site queries belong to the family of their identifier. `SearchQueryData::fromArray()` rebuilds the queries stored in the context.
+- `SearchEscalation`: pending queries of a run (not executed yet, family not tried), families tried (derived from the executions that kept results, so runs searched before v1.3.0 work too), next step, once-per-step claim via `cache()->add()`. Config `product-image-discovery.search.escalation.enabled` / `max_steps` (`PRODUCT_IMAGE_DISCOVERY_SEARCH_ESCALATION`, default true; `PRODUCT_IMAGE_DISCOVERY_SEARCH_MAX_STEPS`, default 4, the first search included).
+- `HandlesRejectedRun` (was `SendsRejectedRunToReview`): when every candidate of the run is rejected and the run has a step left, the request goes back to `searching`, the search/extract guards are reopened, a `pipeline.search.escalated` event is recorded and `SearchProductImageJob($id, continuesRun: $run)` is dispatched; otherwise `manual_review` as in v1.2.2.
+- `SearchProductImageJob`: a continuation keeps the run and `attempts`, runs the pending queries in order, drops results whose fingerprint is already a candidate of the run, and records `step` / `families_tried` in `context.search` and `step` / `seen_results` on each execution. A continuation is ignored when the run changed (retry, re-POST), the step already completed or the request is no longer `searching` (reviewer action). A step that finds no new image ends the run in `manual_review`, never `no_candidates_found`.
+- `ExtractCandidateSourcesJob`: `candidate_ids` / `source_pages` accumulate over the steps; only the new candidates are dispatched to verification.
+- Debug flow command: escalation off (it runs one step inline).
+- Not changed: query generation and the 10-query cap, score weights and thresholds, statuses, auto-publish gates. With trusted sources configured the cap can push the `description` queries out; then the run stops after the code families.
+- Tests: Saint Laurent scenario on the Eloquent store (three steps, bag matched at step 3, coats not verified again), run ending in `manual_review` with all its candidates, once-per-step escalation when two jobs see the run rejected, stale continuation after a retry, step budget and switch; unit tests for families, pending queries and next step.
+
+### Verified Gates
+
+- `vendor/bin/phpunit --testsuite Unit,Feature,E2E`: 124 tests, 4 skipped (live tests).

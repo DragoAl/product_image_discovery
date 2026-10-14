@@ -126,6 +126,10 @@ final class ProductImageDiscoveryDebugFlowCommand extends Command
         $stoppedEarly = false;
         $stopReason = null;
 
+        // The flow below runs one search step inline; an escalation would queue the next step
+        // behind this command's back.
+        config()->set('product-image-discovery.search.escalation.enabled', false);
+
         $request = (new IngestProductImageDiscoveryJob($payload))->handle($store, $logger);
         $storageCleanedRequestIds = $this->cleanStorageRequestIds(array_merge($freshStorageRequestIds, [
             $request['id'] ?? null,
