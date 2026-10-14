@@ -29,6 +29,70 @@ final class TextNormalizer
         ];
     }
 
+    /**
+     * Shop names for brown shades, read only with the tolerate_adjacent_colors setting: without
+     * the adjacent groups below they would turn today's neutral titles into color mismatches.
+     *
+     * @return array<string, list<string>>
+     */
+    public static function extendedColorAliases(): array
+    {
+        return [
+            'brown' => ['caramel', 'cognac', 'tobacco', 'tabacco', 'chocolate', 'cioccolato', 'chestnut', 'castagna', 'hazelnut', 'nocciola', 'mocha', 'moka'],
+        ];
+    }
+
+    /**
+     * Colors that shops and ERPs name differently for the same shade: a "camel" (beige) item is
+     * "caramel" or "brown" on a shop page.
+     *
+     * @return list<list<string>>
+     */
+    public static function adjacentColorGroups(): array
+    {
+        return [
+            ['beige', 'brown'],
+        ];
+    }
+
+    /**
+     * True when every mentioned color is the expected one or in its adjacent group.
+     *
+     * @param list<string> $mentionedColors canonical colors
+     */
+    public static function colorsAreAdjacent(?string $expectedColor, array $mentionedColors): bool
+    {
+        if ($expectedColor === null || $mentionedColors === []) {
+            return false;
+        }
+
+        foreach (self::adjacentColorGroups() as $group) {
+            if (in_array($expectedColor, $group, true) && array_diff($mentionedColors, $group) === []) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array<string, list<string>>
+     */
+    private static function aliases(bool $extended): array
+    {
+        if (! $extended) {
+            return self::colorAliases();
+        }
+
+        $aliases = self::colorAliases();
+
+        foreach (self::extendedColorAliases() as $canonical => $extra) {
+            $aliases[$canonical] = array_values(array_unique(array_merge($aliases[$canonical] ?? [], $extra)));
+        }
+
+        return $aliases;
+    }
+
     public static function nullableString(mixed $value): ?string
     {
         if ($value === null) {
@@ -156,14 +220,48 @@ final class TextNormalizer
         $tokens = [];
 
         foreach ($matches[0] ?? [] as $match) {
-            $token = self::normalizeCode($match);
+            // A URL path is a single match ("shop.com/products/bag-763435008iw2885"): its words
+            // are tokens too, so a code in a slug or in a file name is found.
+            $parts = str_contains($match, '/') ? [$match, ...self::urlPathParts($match)] : [$match];
 
-            if ($token !== null && strlen($token) >= 2) {
-                $tokens[$token] = $token;
+            foreach ($parts as $part) {
+                $token = self::normalizeCode($part);
+
+                if ($token !== null && strlen($token) >= 2) {
+                    $tokens[$token] = $token;
+                }
             }
         }
 
         return array_values($tokens);
+    }
+
+    /**
+     * The words of each path segment and runs of up to four adjacent words with a digit each, so
+     * a code the shop split with separators ("763435-008iw-2885", "763435008IW.2885_06.jpg") is
+     * rebuilt while a slug of plain words ("air-force-1-07") is not read as one code.
+     *
+     * @return list<string>
+     */
+    private static function urlPathParts(string $path): array
+    {
+        $parts = [];
+        $hasDigit = static fn (string $word): bool => preg_match('/\d/', $word) === 1;
+
+        foreach (explode('/', $path) as $segment) {
+            $words = preg_split('/[._\-]+/', $segment, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            $count = count($words);
+
+            for ($start = 0; $start < $count; $start++) {
+                $parts[] = $run = $words[$start];
+
+                for ($end = $start + 1; $end < min($count, $start + 4) && $hasDigit($words[$start]) && $hasDigit($words[$end]); $end++) {
+                    $parts[] = $run .= $words[$end];
+                }
+            }
+        }
+
+        return $parts;
     }
 
     public static function hasSimilarCodeMismatch(string $haystack, ?string $expected): bool
@@ -229,7 +327,7 @@ final class TextNormalizer
         return array_values($suffixes);
     }
 
-    public static function canonicalColor(?string $value): ?string
+    public static function canonicalColor(?string $value, bool $extended = false): ?string
     {
         $value = self::normalizeText($value);
 
@@ -237,7 +335,7 @@ final class TextNormalizer
             return null;
         }
 
-        foreach (self::colorAliases() as $canonical => $aliases) {
+        foreach (self::aliases($extended) as $canonical => $aliases) {
             foreach ($aliases as $alias) {
                 if (preg_match('/(?:^| )' . preg_quote($alias, '/') . '(?: |$)/', $value) === 1) {
                     return $canonical;
@@ -251,7 +349,7 @@ final class TextNormalizer
     /**
      * @return list<string>
      */
-    public static function mentionedColors(string $text): array
+    public static function mentionedColors(string $text, bool $extended = false): array
     {
         $text = self::normalizeText($text);
 
@@ -261,7 +359,7 @@ final class TextNormalizer
 
         $colors = [];
 
-        foreach (self::colorAliases() as $canonical => $aliases) {
+        foreach (self::aliases($extended) as $canonical => $aliases) {
             foreach ($aliases as $alias) {
                 if (preg_match('/(?:^| )' . preg_quote($alias, '/') . '(?: |$)/', $text) === 1) {
                     $colors[$canonical] = $canonical;

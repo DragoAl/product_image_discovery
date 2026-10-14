@@ -124,6 +124,44 @@ final class GenerateSearchQueriesActionTest extends TestCase
         self::assertSame('Wool gabardine shorts', $identity->description);
     }
 
+    public function test_it_skips_a_supplier_sku_that_is_the_model_code_plus_a_color_word(): void
+    {
+        $identity = ProductIdentityData::fromArray([
+            'brand' => 'Saint Laurent',
+            'supplier_sku' => '763435008IW2885 Camel',
+            'model_code' => '763435008IW2885',
+            'color_code' => 'Camel',
+            'color_name' => 'Beige',
+            'name' => 'Le 5 7 Bea Suede Tote Bag',
+        ]);
+
+        $intents = array_map(static fn ($query) => $query->intent, (new GenerateSearchQueriesAction())->handle($identity));
+
+        self::assertSame([
+            'model_code_color_code',
+            'model_code_color_name',
+            'model_code_description',
+            'model_code',
+            'description_color',
+            'description',
+        ], $intents);
+    }
+
+    public function test_it_keeps_a_supplier_sku_with_a_numeric_color_code(): void
+    {
+        $identity = ProductIdentityData::fromArray([
+            'brand' => 'Chloé',
+            'supplier_sku' => '26SSH01164 002',
+            'model_code' => '26SSH01164',
+            'color_code' => '002',
+        ]);
+
+        $intents = array_map(static fn ($query) => $query->intent, (new GenerateSearchQueriesAction())->handle($identity));
+
+        self::assertContains('supplier_sku', $intents);
+        self::assertContains('supplier_sku_color_code', $intents);
+    }
+
     public function test_it_adds_a_site_model_code_query_for_trusted_sources(): void
     {
         $identity = ProductIdentityData::fromArray([

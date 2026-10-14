@@ -397,3 +397,20 @@ Triggered by Gescat request 16 (Saint Laurent `763435008IW2885 Camel`, "Le 5 à 
 ### Verified Gates
 
 - `vendor/bin/phpunit --testsuite Unit,Feature,E2E`: 124 tests, 4 skipped (live tests).
+
+### Scoring of real shop pages for v1.4.0 (branch `m-ad-scoring-tuning`)
+
+Request 16 again, after v1.3.0: the escalation ran three steps and Brave did return the bag (fashionclinic.com with the code `763435008iw2885` in the URL at step 2, Lord & Taylor and Endource at step 3), but every candidate was rejected and the camel dress scored higher than the bag. Causes: codes inside URL paths were one token; the AI verdict weighed at most 15 points; "Brown" in a title was a `WRONG_COLOR` for a Gescat "Beige"; Brave returned Shopify thumbnails (165x220); the supplier SKU `763435008IW2885 Camel` cost a whole step of camel coats.
+
+- `TextNormalizer::extractCodeTokens()`: URL path words, and runs of up to four adjacent words with a digit each, are tokens too.
+- `ScoreCandidateImageAction`: settings `ai_confirms_identifier_match` (AI weight 35 instead of 15 when a strong identifier matched and the AI confirms everything) and `tolerate_adjacent_colors` (beige/brown group neutral, shop names of brown shades read), both off by default; `TextNormalizer::extendedColorAliases()`, `adjacentColorGroups()`, `colorsAreAdjacent()`, and an `$extended` flag on `canonicalColor()` / `mentionedColors()`.
+- `LargeImageUrl` + `SearchResultData::toCandidate()`: Shopify thumbnails asked 2048 px wide (not the original upload, which can be too heavy for the AI provider), width/height left null for rewritten URLs (the evidence keeps the provider's URL).
+- `GenerateSearchQueriesAction`: no `supplier_sku*` query when the supplier SKU is the model code plus a color word.
+- `SearchProductImageJob`: the `description` family step runs all its queries and merges their results (seen fingerprints deduplicated).
+- Not changed: weights and thresholds with the settings off, statuses, auto-publish gates, the AI prompt.
+- Local replay of request 16 with the real Brave results (fixture `tests/Feature/Pipeline/Fixtures/saint-laurent-bea-tote-brave-results.json`, AI verdict simulated: no key locally). v1.3.0: bag 0-9, best other 22, three steps, 29 candidates. Now, settings off: bag first at 30 (44 with an AI confirmation), two steps, 19 candidates. Settings on + AI confirmation: the four fashionclinic images accepted at 63 at step 1, asked 2048 px wide, 9 candidates. AI color mismatch: still `manual_review`.
+
+### Verified Gates
+
+- `vendor/bin/phpunit --testsuite Unit,Feature,E2E`: 151 tests, 4 skipped (live tests).
+

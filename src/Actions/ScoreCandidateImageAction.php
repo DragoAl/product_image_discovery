@@ -28,8 +28,10 @@ final class ScoreCandidateImageAction
         $issues = [];
         $riskPenalty = 0;
 
-        [$textualScore, $textEvidence, $strongMatches, $flags] = $this->scoreTextual($identity, $candidate, $corpus);
-        [$structuredScore, $structuredEvidence, $structuredStrongMatches, $structuredFlags] = $this->scoreStructured($identity, $structured);
+        $tolerateAdjacentColors = $this->enabled($settings, 'tolerate_adjacent_colors');
+
+        [$textualScore, $textEvidence, $strongMatches, $flags] = $this->scoreTextual($identity, $candidate, $corpus, $tolerateAdjacentColors);
+        [$structuredScore, $structuredEvidence, $structuredStrongMatches, $structuredFlags] = $this->scoreStructured($identity, $structured, $tolerateAdjacentColors);
         [$aiEvidence, $aiFlags] = $this->scoreAiVerification($candidate->aiAnalysis, $settings);
 
         $strongMatches = array_merge($strongMatches, $structuredStrongMatches);
@@ -76,7 +78,21 @@ final class ScoreCandidateImageAction
             $issues[] = 'ROBOTS_OR_PERMISSION_BLOCKED';
         }
 
-        $visualScore = min(15, (int) round($this->visualRawScore($candidate) * 0.15));
+        // The AI verdict weighs 15 points; with the ai_confirms_identifier_match setting a full
+        // confirmation of a candidate whose code (or EAN) is already on the page weighs 35, as
+        // much as the code: the two together reach the candidate threshold from an untrusted
+        // shop, while a lookalike without the code still cannot.
+        [$visualCap, $visualWeight] = [15, 0.15];
+
+        if ($this->enabled($settings, 'ai_confirms_identifier_match')
+            && $strongMatches !== []
+            && $aiEvidence['mismatches'] === []
+            && in_array('ai_visual_verification', $aiEvidence['matches'], true)) {
+            [$visualCap, $visualWeight] = [35, 0.35];
+            $evidence['matches'][] = 'ai_confirms_identifier_match';
+        }
+
+        $visualScore = min($visualCap, (int) round($this->visualRawScore($candidate) * $visualWeight));
         $qualityScore = max(0, min(100, $candidate->qualityScore));
         $qualityContribution = (int) round($qualityScore * 0.10);
         $qualityPassed = $qualityScore >= (int) ($settings['min_quality_score'] ?? 70);
@@ -134,7 +150,7 @@ final class ScoreCandidateImageAction
     /**
      * @return array{0:int,1:array{matches:list<string>,mismatches:list<string>},2:list<string>,3:array<string, bool>}
      */
-    private function scoreTextual(ProductIdentityData $identity, CandidateImageData $candidate, string $corpus): array
+    private function scoreTextual(ProductIdentityData $identity, CandidateImageData $candidate, string $corpus, bool $tolerateAdjacentColors): array
     {
         $score = 0;
         $matches = [];
@@ -214,15 +230,18 @@ final class ScoreCandidateImageAction
             $flags['color_mismatch'] = true;
         }
 
-        $expectedColor = $identity->normalizedColorName();
+        $expectedColor = TextNormalizer::canonicalColor($identity->colorName, $tolerateAdjacentColors);
 
         if ($expectedColor !== null) {
-            $mentionedColors = TextNormalizer::mentionedColors($corpus);
+            $mentionedColors = TextNormalizer::mentionedColors($corpus, $tolerateAdjacentColors);
 
             if (in_array($expectedColor, $mentionedColors, true)) {
                 $score += 15;
                 $matches[] = 'color_name';
                 $flags['color_matched'] = true;
+            } elseif ($tolerateAdjacentColors && TextNormalizer::colorsAreAdjacent($expectedColor, $mentionedColors)) {
+                // Neither a match nor a mismatch: no points, no penalty.
+                $matches[] = 'color_name_adjacent';
             } elseif ($mentionedColors !== []) {
                 $mismatches[] = 'color_name_mismatch';
                 $flags['color_mismatch'] = true;
@@ -248,7 +267,7 @@ final class ScoreCandidateImageAction
      * @param array<string, mixed> $structured
      * @return array{0:int,1:array{matches:list<string>,mismatches:list<string>},2:list<string>,3:array<string, bool>}
      */
-    private function scoreStructured(ProductIdentityData $identity, array $structured): array
+    private function scoreStructured(ProductIdentityData $identity, array $structured, bool $tolerateAdjacentColors): array
     {
         $score = 0;
         $matches = [];
@@ -304,15 +323,19 @@ final class ScoreCandidateImageAction
             }
         }
 
-        $expectedColor = $identity->normalizedColorName();
+        $expectedColor = TextNormalizer::canonicalColor($identity->colorName, $tolerateAdjacentColors);
         $actualColorValue = $this->structuredValue($structured, ['color', 'colour']);
-        $actualColor = TextNormalizer::canonicalColor($actualColorValue);
+        $actualColor = TextNormalizer::canonicalColor($actualColorValue, $tolerateAdjacentColors);
 
         if ($expectedColor !== null && $actualColor !== null) {
-            if ($expectedColor === $actualColor || in_array($expectedColor, TextNormalizer::mentionedColors((string) $actualColorValue), true)) {
+            $actualColors = TextNormalizer::mentionedColors((string) $actualColorValue, $tolerateAdjacentColors);
+
+            if ($expectedColor === $actualColor || in_array($expectedColor, $actualColors, true)) {
                 $score += 15;
                 $matches[] = 'structured_color';
                 $flags['color_matched'] = true;
+            } elseif ($tolerateAdjacentColors && TextNormalizer::colorsAreAdjacent($expectedColor, $actualColors)) {
+                $matches[] = 'structured_color_adjacent';
             } else {
                 $mismatches[] = 'structured_color_mismatch';
                 $flags['color_mismatch'] = true;
@@ -320,6 +343,18 @@ final class ScoreCandidateImageAction
         }
 
         return [min(100, $score), ['matches' => $matches, 'mismatches' => $mismatches], $strongMatches, $flags];
+    }
+
+    /**
+     * Opt-in scoring rules are off unless the setting is a true value (true, 1, "true", "on").
+     *
+     * @param array<string, mixed> $settings
+     */
+    private function enabled(array $settings, string $key): bool
+    {
+        $value = $settings[$key] ?? false;
+
+        return is_bool($value) ? $value : filter_var($value, FILTER_VALIDATE_BOOLEAN);
     }
 
     /**
